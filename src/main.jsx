@@ -62,23 +62,26 @@ function App() {
     }
     let active = true;
     const load = async () => {
-      const { data, error } = await supabase.from("kardosh_shared_cards").select("*").order("updated_at", { ascending: false });
-      if (error) {
-        if (active) setNotice("Supabase подключён, но общая таблица недоступна: " + error.message);
+      const [cardsResult, storesResult] = await Promise.all([
+        supabase.from("loyalty_cards").select("*").order("updated_at", { ascending: false }),
+        supabase.from("loyalty_stores").select("*").order("name", { ascending: true })
+      ]);
+      if (cardsResult.error) {
+        if (active) setNotice("Не удалось загрузить карты из Supabase: " + cardsResult.error.message);
         return;
       }
-      const rows = (data || []).filter(row => !row.deleted);
-      const storeRows = rows.filter(row => row.card_data?._wallet_type === "store_image");
-      const cardRows = rows.filter(row => row.card_data?._wallet_type !== "store_image");
-      const storeImageMap = new Map(storeRows.map(row => [row.card_data.store_name, row.card_data.store_image || ""]));
       if (active) {
-        setCards(cardRows.map(row => normalizeSharedCard(row)));
-        setStores(STARTER_STORES.map(name => ({ name, image: storeImageMap.get(name) || "" })));
+        setCards(cardsResult.data || []);
+        const storeRows = storesResult.data || [];
+        setStores(storeRows.length
+          ? storeRows.map(store => ({ name: store.name, image: store.image || "" }))
+          : STARTER_STORES.map(name => ({ name, image: "" })));
       }
     };
     load();
     const channel = supabase.channel("wallet-live-cards")
-      .on("postgres_changes", { event: "*", schema: "public", table: "kardosh_shared_cards" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "loyalty_cards" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "loyalty_stores" }, load)
       .subscribe();
     return () => { active = false; supabase.removeChannel(channel); };
   }, []);
@@ -168,15 +171,10 @@ function App() {
       store_image: form.store_image
     };
     if (supabase) {
-      const row = {
-        id: editing ? editing.id : crypto.randomUUID(),
-        card_data: payload,
-        deleted: false,
-        updated_at: new Date().toISOString()
-      };
+      const row = { ...payload, updated_at: new Date().toISOString() };
       const result = editing
-        ? await supabase.from("kardosh_shared_cards").update({ card_data: payload, deleted: false, updated_at: row.updated_at }).eq("id", editing.id)
-        : await supabase.from("kardosh_shared_cards").insert(row);
+        ? await supabase.from("loyalty_cards").update(row).eq("id", editing.id)
+        : await supabase.from("loyalty_cards").insert(row);
       if (result.error) setNotice("Ошибка сохранения: " + result.error.message);
       else { setNotice("Карта сохранена и синхронизируется у всех пользователей."); setModal(false); }
     } else {
@@ -190,7 +188,7 @@ function App() {
   async function deleteCard(card) {
     if (!confirm(`Удалить карту «${card.card_name || card.store_name}» у всех пользователей?`)) return;
     if (supabase) {
-      const { error } = await supabase.from("kardosh_shared_cards").update({ deleted: true, updated_at: new Date().toISOString() }).eq("id", card.id);
+      const { error } = await supabase.from("loyalty_cards").delete().eq("id", card.id);
       if (error) setNotice("Не удалось удалить карту: " + error.message);
     } else setCards(prev => prev.filter(c => c.id !== card.id));
     setSelected(null);
@@ -202,13 +200,8 @@ function App() {
     const updated = stores.map(s => s.name === storeName ? { ...s, image } : s);
     setStores(updated);
     if (supabase) {
-      const row = {
-        id: "__wallet_store_image__:" + encodeURIComponent(storeName),
-        card_data: { _wallet_type: "store_image", store_name: storeName, store_image: image },
-        deleted: false,
-        updated_at: new Date().toISOString()
-      };
-      const { error } = await supabase.from("kardosh_shared_cards").upsert(row, { onConflict: "id" });
+      const row = { name: storeName, image, updated_at: new Date().toISOString() };
+      const { error } = await supabase.from("loyalty_stores").upsert(row, { onConflict: "name" });
       if (error) setNotice("Фото магазина не сохранилось: " + error.message);
       else setNotice("Фото магазина добавлено и доступно всем.");
     } else setNotice("Фото добавлено только в демо-режиме.");
